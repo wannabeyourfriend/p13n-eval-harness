@@ -1,0 +1,43 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+
+# Virtualenv
+.venv/
+venv/
+env/
+ENV/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Bench outputs
+results/
+logs/
+caches/
+*.log
+*.pid
+
+# Data directories — all symlinked to external benchmark sources
+data/*/
+!data/.gitkeep
+
+# Credentials
+.env
+*.key
+.openai_key
