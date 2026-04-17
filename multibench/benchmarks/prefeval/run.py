@@ -171,107 +171,131 @@ def stage_gen(client: LLMClient, args) -> Path:
 
 # ---------------- stage: classification (MCQ) ----------------
 
-_MCQ_CHOICE_RE = re.compile(r"<choice>\s*([A-D])", re.IGNORECASE)
-
-
-def _extract_choice(text: str) -> str | None:
-    m = _MCQ_CHOICE_RE.search(text)
-    if m:
-        return m.group(1).upper()
-    # fallback: first standalone A/B/C/D
-    m = re.search(r"\b([A-D])\b", text)
-    return m.group(1).upper() if m else None
-
 
 def stage_cls(client: LLMClient, args) -> Path:
-    """Classification: present 4 options and see if the model picks the
-    preference-aligned one. Migrates the logic in upstream
-    `benchmark_classification.py` but runs every item in parallel.
+    """Classification task — port of upstream `benchmark_classification.py`.
+
+    Protocol (from `amazon-science/PrefEval`):
+    1. MCQ options for each (topic, task) come from a *separate* file
+       `benchmark_dataset/mcq_options/<topic>.json`, NOT from the explicit
+       preference data. The first entry of each option list is the correct
+       (preference-aligned) answer.
+    2. `shuffle_options` randomises the 4 options; we track which letter
+       ends up correct.
+    3. `get_question_prompt_mcq` builds the message list (preference turn,
+       pref_generation reply, inter filler, then MCQ question with options).
+       Upstream also appends a trailing assistant prefix `<choice>` — that
+       pattern relies on Bedrock Claude's continuation semantics and is not
+       portable to OpenAI chat API, so we drop it and rely on the prompt's
+       explicit instruction ('Answer example: <choice>B</choice>') to
+       produce the full tag. `extract_choice` + a fallback that re-prepends
+       '<choice>' handles both forms.
+    4. `extract_choice` parses <choice>[A-D]</choice> via BeautifulSoup.
+
+    All upstream logic lives in utils/utils_mcq.py — we reuse those helpers
+    rather than reimplementing, and only add item-level parallelism over
+    both the pref_generation and answer calls.
     """
     if args.pref_form != "explicit":
         raise NotImplementedError("Only --pref-form=explicit currently migrated for cls.")
 
+    from .utils.utils_mcq import (
+        shuffle_options, get_question_prompt_mcq, extract_choice,
+    )
+
     topic_data = _load_topic_data(args.pref_form, args.topic)
+    # Load the upstream-required MCQ options file (NOT from explicit_preference)
+    mcq_path = _data_root() / "mcq_options" / f"{args.topic}.json"
+    if not mcq_path.exists():
+        raise FileNotFoundError(
+            f"MCQ options not found at {mcq_path}. "
+            f"Classification requires benchmark_dataset/mcq_options/<topic>.json."
+        )
+    with mcq_path.open() as f:
+        mcq_data = json.load(f)
     if args.max_items:
         topic_data = topic_data[: args.max_items]
+        mcq_data = mcq_data[: args.max_items]
 
     save_file = _paths(args, "mcq_results")
     inter_messages = _build_inter_messages(args.inter_turns)
     system_prompt = "You are a helpful assistant."
 
-    # Each PrefEval explicit item has "preference", "question", and 4-way MCQ options.
-    # We replicate upstream logic: 4 options listed A-D, the correct one being the
-    # preference-aligned option (index 0 after shuffle is stored in "aligned_op").
-    import random
-    rng = random.Random(args.seed)
+    # Deterministic shuffle — seed the module-level RNG once, like upstream does.
+    import random as _rnd
+    _rnd.seed(args.seed)
 
+    # Step 1: pref_generation for every task, in parallel (same as gen stage)
+    pref_items = [
+        create_user_pref_message(t["preference"], "claude", system_prompt)
+        for t in topic_data
+    ]
+    print(f"[cls] Step 1: eliciting pref_generation for {len(pref_items)} items...")
+    pref_responses = client.chat_batch(
+        pref_items, build_messages=lambda m: m,
+        workers=args.workers, max_tokens=args.max_tokens,
+        temperature=args.temperature, system=system_prompt,
+        desc=f"PrefEval cls·pref {args.topic}",
+    )
+    pref_responses = ["" if isinstance(r, Exception) else r for r in pref_responses]
+
+    # Step 2: build per-task MCQ message lists using upstream helper
     items = []
-    for t in topic_data:
-        if "options" in t:
-            options = list(t["options"])
-        elif "mcq_options" in t:
-            options = list(t["mcq_options"])
-        else:
-            # No MCQ options present — skip classification for this item
-            items.append(None)
-            continue
-        correct_answer = t.get("aligned_op") or options[0]
-        order = list(range(len(options)))
-        rng.shuffle(order)
-        shuffled = [options[i] for i in order]
-        correct_letter = "ABCD"[shuffled.index(correct_answer)] if correct_answer in shuffled else None
-
-        opts_str = "\n".join(f"{'ABCD'[i]}. {o}" for i, o in enumerate(shuffled))
-        question_text = (
-            f"{t['question']}\n\nChoose one option:\n{opts_str}\n\n"
-            f"Answer with the letter inside <choice></choice> tags. "
-            f"Example: <choice>A</choice>."
+    for task_idx, (task, pref_gen) in enumerate(zip(topic_data, pref_responses)):
+        options = mcq_data[task_idx]["classification_task_options"]
+        shuffled, correct_idx = shuffle_options(options)
+        messages = get_question_prompt_mcq(
+            preference=task["preference"],
+            options=shuffled,
+            pref_generation=pref_gen,
+            question=task["question"],
+            multi_inter_message=inter_messages,
+            model_type="claude",
+            turn_number=args.inter_turns,
+            remind=(args.task == "remind"),
+            cot=(args.task == "cot"),
+            system_prompt=system_prompt,
         )
-
-        # Build message list: preference + inter filler + question
-        msgs = [
-            {"role": "user", "content": t["preference"]},
-            {"role": "assistant", "content": "Noted."},
-        ]
-        if inter_messages:
-            msgs.extend(inter_messages)
-        msgs.append({"role": "user", "content": question_text})
+        # Upstream appends a trailing assistant `<choice>` message (Bedrock
+        # continuation hack). OpenAI chat API does not accept a trailing
+        # assistant role to continue from, so strip it.
+        if messages and isinstance(messages, list) and \
+                messages[-1].get("role") == "assistant" and \
+                messages[-1].get("content", "").strip() == "<choice>":
+            messages = messages[:-1]
         items.append({
-            "messages": msgs,
-            "shuffled": shuffled,
-            "correct_letter": correct_letter,
+            "messages": messages,
+            "shuffled_options": shuffled,
+            "correct_idx": correct_idx,
+            "correct_letter": "ABCD"[correct_idx],
         })
 
-    valid_idx = [i for i, it in enumerate(items) if it is not None]
-    print(f"[cls] running {len(valid_idx)} MCQ items (skipped {len(items) - len(valid_idx)} without options)")
-
-    responses: list = [None] * len(items)
-    if valid_idx:
-        valid_items = [items[i] for i in valid_idx]
-        out = client.chat_batch(
-            valid_items, build_messages=lambda it: it["messages"],
-            workers=args.workers, max_tokens=16,
-            temperature=args.temperature, system=system_prompt,
-            desc=f"PrefEval cls {args.topic}",
-        )
-        for i, r in zip(valid_idx, out):
-            responses[i] = r
+    print(f"[cls] Step 2: running MCQ on {len(items)} items...")
+    responses = client.chat_batch(
+        items, build_messages=lambda it: it["messages"],
+        workers=args.workers, max_tokens=args.max_tokens,
+        temperature=args.temperature, system=system_prompt,
+        desc=f"PrefEval cls·mcq {args.topic}",
+    )
 
     correct = 0
     total = 0
-    for t, it, resp in zip(topic_data, items, responses):
-        if it is None:
-            continue
+    for task, pref_gen, it, resp in zip(topic_data, pref_responses, items, responses):
         total += 1
         text = "" if isinstance(resp, Exception) else (resp or "")
-        chosen = _extract_choice(text)
+        chosen = extract_choice(text)
+        if chosen is None:
+            # Fallback: upstream's Bedrock path pre-prepends `<choice>` so
+            # responses like `A</choice>` parse correctly.
+            chosen = extract_choice("<choice>" + text)
         is_correct = (chosen is not None and chosen == it["correct_letter"])
         correct += int(is_correct)
-        t["mcq_response"] = text
-        t["mcq_choice"] = chosen
-        t["mcq_correct_letter"] = it["correct_letter"]
-        t["mcq_correct"] = is_correct
-        t["mcq_shuffled_options"] = it["shuffled"]
+        task["response_to_pref"] = pref_gen
+        task["shuffled_options"] = it["shuffled_options"]
+        task["correct_idx"] = it["correct_letter"]
+        task["mcq_response"] = text
+        task["choice"] = chosen
+        task["mcq_correct"] = is_correct
 
     acc = correct / max(total, 1)
     print(f"[cls] accuracy: {acc:.2%} ({correct}/{total})")

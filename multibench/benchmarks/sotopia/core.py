@@ -96,7 +96,27 @@ def clamp(v, low, high):
     return v
 
 
+def validate_scores(scores_dict):
+    """Return (valid, oob_dims): True only if every provided score is within
+    its paper-defined range. This matches the upstream sotopia package's
+    `zero_to_ten` / `minus_five_to_five` / `minus_ten_to_zero` validators
+    which raise ValueError on out-of-bounds — we instead signal caller so
+    it can retry before falling back to clamping.
+    """
+    oob = []
+    for dim, info in DIMENSIONS.items():
+        if dim not in scores_dict:
+            continue
+        raw = scores_dict[dim]
+        low, high = info["range"]
+        if raw < low or raw > high:
+            oob.append((dim, raw, low, high))
+    return (not oob), oob
+
+
 def clamp_scores(scores_dict):
+    """Fallback path — clamp OOB scores to the valid range. Missing dims
+    default to 0 (negative/bidirectional) or 5 (positive, range midpoint)."""
     clamped = {}
     for dim, info in DIMENSIONS.items():
         if dim in scores_dict:
@@ -198,10 +218,65 @@ def simulate_interaction(
     return conversation, agents
 
 
+def _parse_judge_response(response: str, agents: list) -> dict:
+    """Parse the judge's JSON-object response into per-agent raw score dicts."""
+    if not response:
+        return {}
+    clean = response.strip()
+    if clean.startswith("```"):
+        parts = clean.split("```")
+        if len(parts) >= 2:
+            clean = parts[1]
+            if clean.startswith("json"):
+                clean = clean[4:]
+            clean = clean.strip()
+    try:
+        parsed = json.loads(clean)
+    except json.JSONDecodeError:
+        try:
+            import json_repair
+            parsed = json_repair.loads(clean)
+        except Exception:
+            parsed = {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    per_agent = {}
+    for agent_name in agents:
+        data = parsed.get(agent_name)
+        if data is None:
+            for key in parsed:
+                if isinstance(key, str) and agent_name.split()[0].lower() in key.lower():
+                    data = parsed[key]
+                    break
+        raw = {}
+        if isinstance(data, dict):
+            for dim in DIMENSIONS:
+                v = data.get(dim)
+                if isinstance(v, dict) and "score" in v:
+                    raw[dim] = v["score"]
+                elif isinstance(v, (int, float)):
+                    raw[dim] = v
+        per_agent[agent_name] = raw
+    return per_agent
+
+
 def evaluate_interaction(
     scenario: dict, conversation: list, agents: list, *,
     judge_client: LLMClient, max_tokens: int = 2048,
+    max_judge_retries: int = 1,
 ):
+    """Judge the 7 paper dimensions per agent.
+
+    Protocol alignment with upstream sotopia:
+      - Upstream validators raise ValueError on OOB scores. We instead retry
+        the judge up to `max_judge_retries` times on OOB and only clamp as a
+        final fallback. This preserves the paper's "bad judge output is
+        invalid" semantics while staying robust at scale.
+      - Every scenario records `oob_events` so aggregators can track judge
+        quality over a run.
+    """
+    import logging
     agent1_name, agent2_name = agents[0], agents[1]
     conv_text = "\n".join(f"Turn {c['turn']}: {c['speaker']}: {c['action']}" for c in conversation)
     bg_text = "".join(f"{n}: {b}\n\n" for n, b in scenario["agents_background"].items())
@@ -215,57 +290,39 @@ def evaluate_interaction(
         conversation=conv_text,
         agent1_name=agent1_name, agent2_name=agent2_name,
     )
-    try:
-        response = judge_client.chat(prompt, temperature=0.0, max_tokens=max_tokens)
-    except Exception:
-        response = ""
 
-    agent_scores = {}
-    if response:
-        clean = response.strip()
-        if clean.startswith("```"):
-            parts = clean.split("```")
-            if len(parts) >= 2:
-                clean = parts[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
-                clean = clean.strip()
+    raw_per_agent: dict = {}
+    oob_events: list = []
+    for attempt in range(max_judge_retries + 1):
         try:
-            parsed = json.loads(clean)
-        except json.JSONDecodeError:
-            try:
-                import json_repair
-                parsed = json_repair.loads(clean)
-            except Exception:
-                parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
+            response = judge_client.chat(prompt, temperature=0.0, max_tokens=max_tokens)
+        except Exception:
+            response = ""
+        raw_per_agent = _parse_judge_response(response, agents)
+        any_oob = False
         for agent_name in agents:
-            data = parsed.get(agent_name)
-            if data is None:
-                for key in parsed:
-                    if isinstance(key, str) and agent_name.split()[0].lower() in key.lower():
-                        data = parsed[key]
-                        break
-            raw_scores = {}
-            if isinstance(data, dict):
-                for dim in DIMENSIONS:
-                    v = data.get(dim)
-                    if isinstance(v, dict) and "score" in v:
-                        raw_scores[dim] = v["score"]
-                    elif isinstance(v, (int, float)):
-                        raw_scores[dim] = v
-            agent_scores[agent_name] = clamp_scores(raw_scores)
+            _, oob = validate_scores(raw_per_agent.get(agent_name, {}))
+            if oob:
+                any_oob = True
+                oob_events.extend([(agent_name, *o, attempt) for o in oob])
+        if not any_oob:
+            break  # valid scores → done
+        if attempt < max_judge_retries:
+            logging.warning(
+                "sotopia judge produced OOB scores (attempt %d): %s — retrying",
+                attempt + 1, oob_events[-5:],
+            )
 
-    for agent_name in agents:
-        if agent_name not in agent_scores:
-            agent_scores[agent_name] = clamp_scores({})
-
+    # Final: clamp whatever we ended up with
+    agent_scores = {n: clamp_scores(raw_per_agent.get(n, {})) for n in agents}
     for agent_name in agents:
         dim_values = [agent_scores[agent_name][d] for d in DIMENSIONS if d in agent_scores[agent_name]]
         agent_scores[agent_name]["overall_score"] = (
             sum(dim_values) / len(dim_values) if dim_values else 0.0
         )
+    # Expose OOB events so the aggregator can surface judge quality
+    if oob_events:
+        agent_scores["_meta"] = {"oob_events": oob_events}
     return agent_scores
 
 
@@ -308,17 +365,25 @@ def run_sotopia(
             results[i] = fut.result()
 
     all_agent_scores = []
+    total_oob_events = 0
+    scenarios_with_oob = 0
     for r in results:
         if r is None:
             continue
         for name in r["agents"]:
             all_agent_scores.append(r["agent_scores"][name])
+        meta = r["agent_scores"].get("_meta", {})
+        if meta.get("oob_events"):
+            total_oob_events += len(meta["oob_events"])
+            scenarios_with_oob += 1
 
     summary = {
         "model": sim_client.model_name,
         "judge_model": judge_client.model_name,
         "total_scenarios": len(scenarios),
         "total_agent_evaluations": len(all_agent_scores),
+        "judge_oob_events": total_oob_events,
+        "scenarios_with_oob": scenarios_with_oob,
         "dimensions": {},
     }
     for dim in DIMENSIONS:

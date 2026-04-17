@@ -113,35 +113,63 @@ class PersonaBenchmarkEvaluator:
             return []
     
     def _reduce_context_length(self, conversations: List[Dict[str, str]], tokens_to_remove: int = 2000) -> List[Dict[str, str]]:
-        """Reduce context length by trimming oldest messages (keep tail which contains the query)."""
+        """Reduce context length by removing code-related conversations."""
         enc = tiktoken.encoding_for_model("gpt-4o")
 
-        # Keep system message (index 0) and the final user query (last), trim oldest in middle
-        if len(conversations) < 4:
-            return conversations
+        print(f"Reducing context by removing ~{tokens_to_remove} tokens...")
 
-        system_msgs = []
-        if conversations and conversations[0].get('role') == 'system':
-            system_msgs = [conversations[0]]
-            body = conversations[1:]
-        else:
-            body = conversations
+        # Pattern to detect code-related content
+        code_pattern = re.compile(r'\b(code|python|buggy)\b', re.IGNORECASE)
 
-        # Preserve last user message (the MCQ query + options)
-        tail = body[-1:]
-        middle = body[:-1]
+        # Sample 1000 random conversations to find code-related content
+        sample_size = min(1000, len(conversations))
+        sample_indices = random.sample(range(len(conversations)), sample_size)
 
-        removed_tokens = 0
-        removed_count = 0
-        while middle and removed_tokens < tokens_to_remove:
-            msg = middle.pop(0)
-            t = len(enc.encode(str(msg.get('content', ''))))
-            removed_tokens += t
-            removed_count += 1
+        code_indices = []
+        for idx in sample_indices:
+            content = str(conversations[idx].get('content', ''))
+            if code_pattern.search(content):
+                code_indices.append(idx)
 
-        final_conversations = system_msgs + middle + tail
-        print(f"Removed {removed_count} oldest messages (~{removed_tokens} tokens)")
+        # Remove conversation pairs and count tokens removed
+        random.shuffle(code_indices)
+        indices_to_remove = set()
+        tokens_removed = 0
+
+        for idx in code_indices:
+            if idx in indices_to_remove or tokens_removed >= tokens_to_remove:
+                continue
+
+            role = conversations[idx].get('role', '')
+
+            # Identify pair indices
+            if role == 'user' and idx + 1 < len(conversations):
+                pair_indices = [idx, idx + 1]
+            elif role == 'assistant' and idx - 1 >= 0:
+                pair_indices = [idx - 1, idx]
+            else:
+                pair_indices = [idx]
+
+            # Count tokens in this pair
+            pair_tokens = sum(
+                len(enc.encode(str(conversations[i].get('content', ''))))
+                for i in pair_indices
+            )
+
+            # Add to removal set
+            indices_to_remove.update(pair_indices)
+            tokens_removed += pair_tokens
+
+        # Create final list without removed indices
+        final_conversations = [
+            conv for i, conv in enumerate(conversations)
+            if i not in indices_to_remove
+        ]
+
+        print(f"Removed {len(indices_to_remove)} messages (~{tokens_removed} tokens)")
+        # Update the cache
         self.chat_history_cache[self._current_chat_history_path] = final_conversations
+
         return final_conversations
     
 
@@ -166,10 +194,10 @@ class PersonaBenchmarkEvaluator:
             option_parts.append(f"{letter}. {option}")
         
         mcq_instruction = (
-            "Based on our conversation history, which of the following answers best matches my preferences? "
-            "Choose one option.\n\n" +
+            "Please choose the best answer from the following options:\n\n" +
             "\n".join(option_parts) +
-            "\n\nThink step by step, then give your final answer as 'Final Answer: [Letter]'"
+            "\n\nThink step by step about which answer best fits the user's query and conversation context. "
+            "Provide your reasoning first, then give your final answer as 'Final Answer: [Letter]'"
         )
         
         return mcq_instruction, option_mapping
@@ -262,11 +290,8 @@ class PersonaBenchmarkEvaluator:
                     correct_mcq_option = letter
                     break
             
-            # Merge MCQ instruction into the last user message to avoid consecutive user msgs
-            messages_to_send = chat_history + [{
-                "role": "user",
-                "content": user_query_dict.get('content', '') + "\n\n" + mcq_instruction
-            }]
+            # Add MCQ instruction as system message and send full conversation (official upstream)
+            messages_to_send = full_chat_history + [{"role": "system", "content": mcq_instruction}]
             
             response_mcq = self._query_with_retry(messages_to_send)
             
