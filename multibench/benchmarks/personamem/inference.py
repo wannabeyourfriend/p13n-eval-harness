@@ -160,6 +160,27 @@ class PersonaBenchmarkEvaluator:
             indices_to_remove.update(pair_indices)
             tokens_removed += pair_tokens
 
+        # Fallback: if code-pattern scan did not free enough tokens (e.g. the
+        # history has no code content at all), drop oldest user/assistant pairs
+        # instead. Keep the very first + last turns for task-framing. Without
+        # this, retries make zero progress on general-purpose chat and every
+        # context-length error goes unrecovered.
+        if tokens_removed < tokens_to_remove:
+            def _pair_tokens(i, j):
+                return sum(len(enc.encode(str(conversations[k].get('content', ''))))
+                           for k in (i, j) if 0 <= k < len(conversations))
+            # Walk from the oldest pair forward, skipping already-removed and
+            # the very first pair (preserves task framing).
+            start_skip = 2 if len(conversations) >= 4 else 0
+            i = start_skip
+            while i + 1 < len(conversations) - 2 and tokens_removed < tokens_to_remove:
+                if i in indices_to_remove or (i + 1) in indices_to_remove:
+                    i += 2
+                    continue
+                tokens_removed += _pair_tokens(i, i + 1)
+                indices_to_remove.update([i, i + 1])
+                i += 2
+
         # Create final list without removed indices
         final_conversations = [
             conv for i, conv in enumerate(conversations)

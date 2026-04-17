@@ -131,7 +131,9 @@ def _run_category(
             desc=f"gen {category}",
         )
         for item, ans in zip(todo, answers):
-            cached[item["id"]] = ans
+            # chat_batch stores exceptions at failed indices — coerce so the
+            # downstream json dump works and the judge pass gets a string.
+            cached[item["id"]] = "" if isinstance(ans, BaseException) else str(ans or "")
     preds_list = [{"id": x["id"], "output": cached.get(x["id"], "")} for x in data]
     atomic_write_json(preds_path, preds_list)
 
@@ -160,7 +162,8 @@ def _run_category(
         )
         per_item: dict[str, dict[int, int]] = {}
         for (iid, idx, *_), g in zip(jobs, grades):
-            per_item.setdefault(iid, {})[idx] = _parse_score(g)
+            txt = "" if isinstance(g, BaseException) else str(g or "")
+            per_item.setdefault(iid, {})[idx] = _parse_score(txt)
         for x in data:
             if x["id"] in scores:
                 continue
