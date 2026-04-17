@@ -40,6 +40,10 @@ data/*
 !data/.gitkeep
 
 # Credentials
-.env
+.env.*
+.env.openai.proposer
 *.key
 .openai_key
+# claude code — ignore local state, keep shared project skills
+.claude/*
+!.claude/skills/
