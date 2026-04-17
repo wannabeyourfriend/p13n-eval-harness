@@ -48,7 +48,12 @@ class QueryLLM:
         self._current_cache_key = None       # Set by inference.py before each query
         self._gemini_caches = {}             # {cache_key: (CachedContent, GenerativeModel)}
 
-        load_dotenv(override=True)
+        # NOTE: override=False (was True upstream). With override=True, a
+        # parent-directory .env file silently replaces the OPENAI_BASE_URL /
+        # OPENAI_API_KEY exported by the multibench wrapper, sending all calls
+        # to api.openai.com instead of the local vLLM endpoint and producing
+        # opaque "invalid model ID" errors.
+        load_dotenv(override=False)
         self._setup_client()
 
 
