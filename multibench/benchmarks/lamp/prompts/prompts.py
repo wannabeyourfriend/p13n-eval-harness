@@ -16,6 +16,10 @@ def classification_news_query_corpus_maker(inp, profile):
     return corpus, query
 
 def classification_movies_query_corpus_maker(inp, profile):
+    # LaMP-2 distributed as two versions: movies (profile: description/tag) and
+    # news-classification (profile: text/title/category). Auto-detect.
+    if profile and "description" not in profile[0] and "text" in profile[0] and "category" in profile[0]:
+        return classification_news_query_corpus_maker(inp, profile)
     corpus = [f'{x["description"]}' for x in profile]
     query = extract_after_description(inp)
     return corpus, query
@@ -82,6 +86,9 @@ def create_classification_news_prompt(inp, profile, max_length, tokenizer): # go
     return f'{", and ".join(prompts)}. {inp}'
 
 def create_classification_movies_prompt(inp, profile, max_length, tokenizer): # good
+    # Auto-fallback to news-classification prompt when profile schema matches.
+    if profile and "description" not in profile[0] and "text" in profile[0] and "category" in profile[0]:
+        return create_classification_news_prompt(inp, profile, max_length, tokenizer)
     per_p_max_length = (max_length - 1 - 2 * (len(profile) - 1)) // len(profile)
     saved_tokens = 0
     prompts = []

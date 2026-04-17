@@ -68,16 +68,44 @@ def _prefeval_topic_summaries(model_root: Path) -> list[dict]:
 
 
 def _bigtom_summary(model_root: Path, model: str) -> dict | None:
-    safe = model.replace("/", "_")
-    path = model_root / "BigTom" / f"summary_{safe}.json"
+    bt_dir = model_root / "BigTom"
+    if not bt_dir.exists():
+        return None
+    # try friendly-name first, then any summary_*.json (served model id may differ)
+    candidates = [bt_dir / f"summary_{model.replace('/', '_')}.json",
+                  *sorted(bt_dir.glob("summary_*.json"))]
+    for path in candidates:
+        if path.exists():
+            with path.open() as f:
+                return json.load(f)
+    return None
+
+
+def _sotopia_summary(model_root: Path) -> dict | None:
+    path = model_root / "Sotopia" / "sotopia_summary.json"
     if not path.exists():
         return None
     with path.open() as f:
         return json.load(f)
 
 
-def _sotopia_summary(model_root: Path) -> dict | None:
-    path = model_root / "Sotopia" / "sotopia_summary.json"
+def _lamp_summaries(model_root: Path) -> list[dict]:
+    """Read each LaMP/<task>/results.json."""
+    lamp_root = model_root / "LaMP"
+    if not lamp_root.exists():
+        return []
+    out = []
+    for results_path in sorted(lamp_root.glob("*/results.json")):
+        try:
+            with results_path.open() as f:
+                out.append(json.load(f))
+        except Exception as e:
+            print(f"  (warn) failed to parse {results_path}: {e}", file=sys.stderr)
+    return out
+
+
+def _lampqa_summary(model_root: Path) -> dict | None:
+    path = model_root / "LaMP-QA" / "summary.json"
     if not path.exists():
         return None
     with path.open() as f:
@@ -146,6 +174,31 @@ def summarize_model(model: str, results_root: Path) -> None:
             print(f"  Overall (mean of {len(dim_avgs)} dims): {sum(dim_avgs)/len(dim_avgs):.2f}")
     else:
         print("\nSotopia: (no results found)")
+
+    # ---- LaMP ----
+    lamps = _lamp_summaries(model_root)
+    if lamps:
+        print("\nLaMP")
+        for r in lamps:
+            task = r.get("task", "?")
+            metric_parts = []
+            for key in ("accuracy", "f1", "mae", "rmse", "rouge-1", "rouge-L", "bleu"):
+                if key in r and isinstance(r[key], (int, float)):
+                    metric_parts.append(f"{key}={r[key]:.4f}")
+            print(f"  {task:<8} n={r.get('num_items','?'):<5}  " + "  ".join(metric_parts))
+    else:
+        print("\nLaMP: (no results found)")
+
+    # ---- LaMP-QA ----
+    lqa = _lampqa_summary(model_root)
+    if lqa:
+        print("\nLaMP-QA")
+        for cat in lqa.get("per_category", []):
+            print(f"  {cat['category']:<40s} n={cat['n_items']:<5} mean={cat['mean_score']:.4f}")
+        if "overall_mean_score" in lqa:
+            print(f"  {'Overall':<40s}            mean={lqa['overall_mean_score']:.4f}")
+    else:
+        print("\nLaMP-QA: (no results found)")
 
 
 def main() -> int:

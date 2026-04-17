@@ -17,6 +17,7 @@ from types import ModuleType
 BENCHMARKS = [
     "bigtom",
     "lamp",
+    "lampqa",
     "personalens",
     "personamem",
     "prefeval",
