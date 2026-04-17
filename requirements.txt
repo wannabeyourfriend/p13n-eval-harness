@@ -1,0 +1,28 @@
+# Core
+openai>=1.30.0
+tqdm>=4.66
+pyyaml>=6.0
+tiktoken>=0.5
+diskcache>=5.6
+
+# Benchmarks
+beautifulsoup4>=4.12      # PrefEval judge XML parsing
+evaluate>=0.4             # LaMP metrics (BLEU/ROUGE/METEOR/MAE/F1)
+sacrebleu>=2.4            # LaMP
+rouge-score>=0.1.2        # LaMP
+nltk>=3.9                 # LaMP (meteor)
+scipy>=1.11               # CURATe statistics
+pandas>=2.0               # CURATe results aggregation
+numpy>=1.24
+scikit-learn>=1.3         # LaMP classification metrics
+
+# PersonaMem-v2
+timeout-decorator>=0.5    # PersonaMem query_llm timeout
+json-repair>=0.20         # PersonaMem malformed-JSON recovery
+python-dotenv>=1.0        # PersonaMem env loading
+rank-bm25>=0.2            # LaMP BM25 retriever
+
+# Optional (installed via extras)
+# boto3 — only if using Bedrock as a backend (not needed for vLLM)
+# google-genai — only if calling Gemini
+# replicate — only if using Replicate (CURATe fallback)

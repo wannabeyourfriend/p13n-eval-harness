@@ -33,8 +33,10 @@ caches/
 *.log
 *.pid
 
-# Data directories — all symlinked to external benchmark sources
-data/*/
+# Data directories — all symlinked to external benchmark sources. We do
+# NOT track symlinks because their target is host-specific; each user
+# recreates them per the README.
+data/*
 !data/.gitkeep
 
 # Credentials

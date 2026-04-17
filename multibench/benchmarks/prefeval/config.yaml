@@ -1,0 +1,8 @@
+max_gen_tokens: 300
+max_mcq_tokens: 5
+system_prompt: 'You are a helpful assistant.'
+
+# vLLM settings (for evaluating local models)
+# Start your vLLM server first: python server.py --model-path /path/to/model --port 8080
+api_base: 'http://localhost:8080/v1'
+model_name: 'default'
