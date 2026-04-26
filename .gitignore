@@ -47,3 +47,4 @@ data/*
 # claude code — ignore local state, keep shared project skills
 .claude/*
 !.claude/skills/
+results_prefeval_gen/
