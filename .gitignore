@@ -48,3 +48,9 @@ data/*
 .claude/*
 !.claude/skills/
 results_prefeval_gen/
+results_personamem_v2_gen/
+results_v4_personalens/
+results_v4_smoke/
+results_v4_full/
+results_v4_sotopia/
+results_v4/
