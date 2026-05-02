@@ -1,134 +1,110 @@
-# p13n-eval-harness
+# evaluations
 
-Unified evaluation harness for 6 personalization benchmarks over any
-OpenAI-compatible endpoint (vLLM, OpenAI, etc.). Every benchmark takes
-the same base flags; every benchmark parallelises via `--workers`.
+Unified evaluation harness for **six personalization benchmarks**, exposed
+behind a single CLI (`multibench run <bench> --`) that targets any
+OpenAI-compatible endpoint (vLLM, OpenAI, Anthropic via gateway, …).
 
-## Benchmarks
+| Benchmark     | Capability                          | Upstream                               | Protocol            |
+|---------------|-------------------------------------|----------------------------------------|---------------------|
+| `personamem`  | long-term memory                    | bowen-upenn/PersonaMem-v2              | implicit-persona MCQ|
+| `prefeval`    | preference adherence                | amazon-science/PrefEval                | gen + cls + judge   |
+| `bigtom`      | theory of mind                      | cicl-stanford/procedural-evals-tom     | ToM MCQ (2 × 200)   |
+| `lamp`        | per-task personalization            | LaMP-Benchmark/LaMP                    | 7 tasks (F1/MAE/BLEU)|
+| `personalens` | long-context personalized dialogue  | amazon-science/PersonaLens             | gen + 4-dim judge   |
+| `sotopia`     | social interaction                  | sotopia-lab/sotopia                    | 7-dim social judge  |
 
-| name          | upstream                               | protocol            |
-|---------------|----------------------------------------|---------------------|
-| `bigtom`      | cicl-stanford/procedural-evals-tom     | ToM MCQ (2 × 200)   |
-| `lamp`        | LaMP-Benchmark/LaMP                    | 7 tasks, F1/MAE/BLEU|
-| `personalens` | amazon-science/PersonaLens             | gen + 4-dim judge   |
-| `personamem`  | bowen-upenn/PersonaMem-v2              | implicit-persona MCQ|
-| `prefeval`    | amazon-science/PrefEval                | gen + cls + judge   |
-| `sotopia`     | sotopia-lab/sotopia (paper-aligned)    | 7-dim social judge  |
+Each benchmark parallelises at the item level via `--workers`. Evaluation
+protocols, prompts, and metric functions match upstream byte-for-byte; the
+only first-class divergence is that all backends are routed through a
+single `LLMClient` so generation and judge endpoints can be split via
+`--api-base` / `--judge-api-base`.
 
-## Install
+## Quickstart
 
 ```bash
-pip install -r requirements.txt
 pip install -e .
+
+# 1. point at any OpenAI-compatible endpoint
+export OPENAI_API_KEY=sk-...
+M=Qwen/Qwen3-8B
+BASE=http://localhost:8002/v1
+
+# 2. run any benchmark — same flag shape
+multibench run personamem -- --api-base $BASE --model $M --workers 64 \
+                             --output-dir results/$M/PersonaMem
 ```
 
-## CLI — unified flags
+A full six-bench sweep for one model: `bash scripts/run_all.sh`.
+
+## CLI
+
+Common flags every benchmark accepts:
 
 ```
-multibench run <bench> -- \
-    --api-base   URL           (OpenAI-compatible base)
-    --model      NAME          (required; model name on the endpoint)
-    --output-dir DIR           (required)
-    --workers    N             (default 32; parallel requests)
-    --max-items  N             (cap for quick testing)
-    --api-key    KEY           (default $OPENAI_API_KEY)
-    [--max-tokens N  --temperature F  --seed N  --no-strip-think]
+--api-base    URL          OpenAI-compatible endpoint
+--model       NAME         model name on that endpoint                (required)
+--output-dir  DIR          where per-item JSONL + summary lands       (required)
+--workers     N            parallel requests                          (default 32)
+--max-items   N            cap items for a smoke run
+--api-key     KEY          (default: $OPENAI_API_KEY)
+[--max-tokens N · --temperature F · --seed N · --no-strip-think]
 ```
 
-Each benchmark adds its own flags on top (topic, task, dim, …). See
-`multibench run <bench> -- --help`.
-
-## Usage
+Per-benchmark extras (topic, task, eval-mode, judge model, …) are listed
+under `multibench run <bench> -- --help`. The most-used invocations:
 
 ```bash
-# BigTom
-multibench run bigtom -- \
-    --api-base http://localhost:8002/v1 --model $M --workers 64 \
-    --condition both --output-dir results/$M/BigTom
+# BigTom — both forward + backward conditions
+multibench run bigtom      -- --api-base $BASE --model $M --condition both \
+                              --output-dir results/$M/BigTom
 
-# LaMP (run per task)
-multibench run lamp -- \
-    --api-base http://localhost:8002/v1 --model $M --workers 64 \
-    --task LaMP-1 --use-profile --num-retrieved 3 --retriever bm25 \
-    --output-dir results/$M/LaMP_1
+# LaMP — one task at a time, choose retriever + profile usage
+multibench run lamp        -- --api-base $BASE --model $M --task LaMP-1 \
+                              --use-profile --num-retrieved 3 --retriever bm25 \
+                              --output-dir results/$M/LaMP_1
 
-# PrefEval — full pipeline (gen + cls + judge + accuracy)
-multibench run prefeval -- \
-    --api-base http://localhost:8002/v1 --model $M --workers 64 \
-    --topic travel_restaurant --inter-turns 2 --task zero-shot --stage all \
-    --judge-api-base https://api.openai.com/v1 --judge-model gpt-4.1-mini \
-    --output-dir results/$M/PrefEval
+# PrefEval — gen + cls + judge in one shot
+multibench run prefeval    -- --api-base $BASE --model $M --topic travel_restaurant \
+                              --inter-turns 2 --task zero-shot --stage all \
+                              --judge-api-base https://api.openai.com/v1 \
+                              --judge-model    gpt-4.1-mini \
+                              --output-dir results/$M/PrefEval
 
-# PersonaLens — generate then judge
-multibench run personalens -- --stage gen \
-    --api-base http://localhost:8002/v1 --model $M --workers 64 --sample s5 \
-    --output-dir results/$M/PersonaLens
-multibench run personalens -- --stage eval \
-    --api-base https://api.openai.com/v1 --model gpt-4.1-mini --workers 200 \
-    --model-tag "${M}_d_p_s" --eval-dim personalization --sample s5 \
-    --output-dir results/$M/PersonaLens
+# PersonaLens — separate gen and judge stages (judge can be a stronger model)
+multibench run personalens -- --stage gen  --api-base $BASE --model $M \
+                              --sample s5 --output-dir results/$M/PersonaLens
+multibench run personalens -- --stage eval --api-base https://api.openai.com/v1 \
+                              --model gpt-4.1-mini --workers 200 \
+                              --eval-dim personalization --sample s5 \
+                              --model-tag "${M}_d_p_s" \
+                              --output-dir results/$M/PersonaLens
 
-# PersonaMem-v2
-multibench run personamem -- \
-    --api-base http://localhost:8002/v1 --model $M --workers 64 \
-    --eval-mode mcq --size 32k --output-dir results/$M/PersonaMem
+# PersonaMem-v2 — 32k context window required
+multibench run personamem  -- --api-base $BASE --model $M --eval-mode mcq \
+                              --size 32k --output-dir results/$M/PersonaMem
 
-# Sotopia
-multibench run sotopia -- \
-    --api-base http://localhost:8002/v1 --model $M --workers 32 \
-    --judge-api-base https://api.openai.com/v1 --judge-model gpt-4.1-mini \
-    --output-dir results/$M/Sotopia
+# Sotopia — paper-aligned 7-dim judge
+multibench run sotopia     -- --api-base $BASE --model $M --workers 32 \
+                              --judge-api-base https://api.openai.com/v1 \
+                              --judge-model    gpt-4.1-mini \
+                              --output-dir results/$M/Sotopia
 ```
-
-Full sweep for one model: `scripts/run_all.sh`.
 
 ## Data
 
-Each benchmark reads from `data/<name>/`. These are symlinks to upstream
-downloads and are gitignored. Create once:
+Each benchmark reads from `data/<name>/`. Symlink to your local upstream
+checkouts (gitignored) once per machine:
 
 ```bash
-ln -sfn /path/to/BigTom/data          data/bigtom
-ln -sfn /path/to/LaMP/data            data/lamp
-ln -sfn /path/to/PersonaLens/data     data/personalens
-ln -sfn /path/to/PersonaMem-v2/data   data/personamem
-ln -sfn /path/to/PrefEval/benchmark_dataset  data/prefeval
-# sotopia scenarios ship with the package (sotopia_scenarios.json)
+ln -sfn /path/to/BigTom/data                data/bigtom
+ln -sfn /path/to/LaMP/data                  data/lamp
+ln -sfn /path/to/PersonaLens/data           data/personalens
+ln -sfn /path/to/PersonaMem-v2/data         data/personamem
+ln -sfn /path/to/PrefEval/benchmark_dataset data/prefeval
+# sotopia scenarios ship in-package as sotopia_scenarios.json
 ```
-
-## Layout
-
-```
-multibench/
-├── cli.py           # `multibench run <bench>` dispatcher
-├── client.py        # shared LLMClient — chat() + parallel chat_batch()
-├── args.py          # common CLI flags
-├── utils.py         # strip_think, atomic_write_json, data-dir resolver
-└── benchmarks/
-    ├── bigtom/      run.py
-    ├── lamp/        run.py  prompts/  data_utils/
-    ├── personalens/ run.py  src/      util/
-    ├── personamem/  run.py  inference.py  query_llm.py  …
-    ├── prefeval/    run.py  utils/    generation_task/  classification_task/
-    └── sotopia/     run.py  core.py   sotopia_scenarios.json
-```
-
-## Divergences from upstream
-
-- All backends routed through a single OpenAI-compatible `LLMClient`
-  (no boto3/Bedrock, no Replicate).
-- Previously-serial harnesses (PrefEval gen/cls/judge, BigTom, LaMP) now
-  parallelise at the item level via `ThreadPoolExecutor`.
-- PrefEval LLM judge ported from Bedrock Claude-3-Sonnet to the shared
-  client; `--judge-api-base` / `--judge-model` allow splitting generation
-  and judge endpoints.
-- `<think>...</think>` stripping on by default for Qwen3-style models.
-- Evaluation protocols match upstream (MCQ prompts, metric functions,
-  score ranges). Sotopia uses a paper-aligned 7-dim judge rather than
-  the full upstream Redis/FastAPI package; OOB judge scores trigger one
-  retry before falling back to clamping.
 
 ## License
 
-Each benchmark retains its upstream license. See individual
-`multibench/benchmarks/<name>/` for the ported source files.
+Each benchmark retains its upstream license. See per-benchmark source
+under `multibench/benchmarks/<name>/`.
