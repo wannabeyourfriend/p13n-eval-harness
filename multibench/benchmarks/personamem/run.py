@@ -16,8 +16,7 @@ import runpy
 import sys
 from pathlib import Path
 
-from ...args import add_common_llm_args
-from ...utils import benchmark_data_dir, ensure_dir
+from ...core import add_common_llm_args, benchmark_data_dir, ensure_dir
 
 
 def _parser() -> argparse.ArgumentParser:

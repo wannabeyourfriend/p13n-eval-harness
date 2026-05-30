@@ -22,9 +22,7 @@ from pathlib import Path
 
 from rank_bm25 import BM25Okapi
 
-from ...args import add_common_llm_args
-from ...client import LLMClient, client_from_args
-from ...utils import atomic_write_json, benchmark_data_dir, ensure_dir
+from ...core import LLMClient, add_common_llm_args, atomic_write_json, benchmark_data_dir, client_from_args, ensure_dir
 
 
 CATEGORIES = ["Art_and_Entertainment", "Lifestyle_and_Personal_Development", "Society_and_Culture"]

@@ -5,9 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from ...args import add_common_llm_args
-from ...client import LLMClient, client_from_args
-from ...utils import atomic_write_json, ensure_dir
+from ...core import LLMClient, add_common_llm_args, atomic_write_json, client_from_args, ensure_dir
 
 from .core import run_sotopia
 
