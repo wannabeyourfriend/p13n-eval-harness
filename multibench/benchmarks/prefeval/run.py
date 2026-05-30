@@ -30,9 +30,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
-from ...args import add_common_llm_args
-from ...client import LLMClient, client_from_args
-from ...utils import atomic_write_json, benchmark_data_dir, ensure_dir
+from ...core import LLMClient, add_common_llm_args, atomic_write_json, benchmark_data_dir, client_from_args, ensure_dir
 
 from .utils.common_utils import (
     ALL_TOPICS, COT_PROMPT, REMINDER, extract_multi_turn_conversation,

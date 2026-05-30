@@ -17,9 +17,7 @@ import json
 import random
 from pathlib import Path
 
-from ...args import add_common_llm_args
-from ...client import client_from_args
-from ...utils import atomic_write_json, ensure_dir
+from ...core import add_common_llm_args, atomic_write_json, client_from_args, ensure_dir
 
 PROMPT_PATH = Path(__file__).with_name("prompt_evaluate.txt")
 
@@ -35,7 +33,7 @@ def _find_csv(user_path: str | None) -> Path:
             raise FileNotFoundError(p)
         return p
     # default: repo data symlink
-    from ...utils import benchmark_data_dir
+    from ...core import benchmark_data_dir
     root = benchmark_data_dir("bigtom")
     # upstream structure: data/bigtom/bigtom.csv
     cand = root / "bigtom" / "bigtom.csv"
